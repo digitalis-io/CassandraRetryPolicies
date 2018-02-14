@@ -57,7 +57,7 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
     }
 
     /**
-     * If at least one replica is available or current CL is EACH_QUORUM, retry.
+     * If at least min chosen replica is available or current CL is EACH_QUORUM, retry.
      */
     private RetryDecision chosenCL(int knownOk, ConsistencyLevel currentCL) {
 
