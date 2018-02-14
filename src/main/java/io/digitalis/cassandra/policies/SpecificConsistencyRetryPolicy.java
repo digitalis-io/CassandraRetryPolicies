@@ -143,8 +143,8 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
     /**
      * {@inheritDoc}
      * <p/>
-     * This implementation triggers a maximum of one retry. If at least one replica
-     * is know to be alive, the operation is retried at a lower consistency
+     * This implementation triggers a maximum number of chosen retrues. If the minumum replica
+     * is know to be alive, the operation is retried at the chosen consistency
      * level.
      */
     @Override
