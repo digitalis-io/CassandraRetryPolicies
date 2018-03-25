@@ -29,59 +29,40 @@ import com.datastax.driver.core.exceptions.DriverException;
 public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
 
     public static final int DEFAULT_MAX_RETRIES = 3;
-    public static final int DEFAULT_MIN_ALIVE_REPLICA = 1;
     private final ConsistencyLevel retryConsistencyLevel;
-    private final int minAliveReplica;
     private final int maxRetryAttempts;
 
 
     public SpecificConsistencyRetryPolicy(String retryCL) {
-        this(retryCL, SpecificConsistencyRetryPolicy.DEFAULT_MAX_RETRIES, SpecificConsistencyRetryPolicy.DEFAULT_MIN_ALIVE_REPLICA);
+        this(retryCL, SpecificConsistencyRetryPolicy.DEFAULT_MAX_RETRIES);
     }
+
 
     public SpecificConsistencyRetryPolicy(String retryCL, int maxRetryAttempts) {
-        this(retryCL, maxRetryAttempts, SpecificConsistencyRetryPolicy.DEFAULT_MIN_ALIVE_REPLICA);
-    }
-
-    public SpecificConsistencyRetryPolicy(String retryCL, int maxRetryAttempts, int minAliveReplica) {
-        if (maxRetryAttempts < 1 || maxRetryAttempts > 4) {
-            throw new IllegalArgumentException("Retry attempts must be a min of 1 and max of 4");
-        }
-        if (minAliveReplica < 0) {
-            throw new IllegalArgumentException("Minimum alive replica count must be >= 0");
+        if (maxRetryAttempts < 1) {
+            throw new IllegalArgumentException("Retry attempts must be a > 1");
         }
 
         this.retryConsistencyLevel = ConsistencyLevel.valueOf(retryCL);
-        this.maxRetryAttempts = maxRetryAttempts;
-        this.minAliveReplica = minAliveReplica;
+        this.maxRetryAttempts = (maxRetryAttempts + 2); //Account for network blip retry attempts
     }
 
-    /**
-     * If at least min chosen replica is available or current CL is EACH_QUORUM, retry.
-     */
-    private RetryDecision chosenCL(int knownOk, ConsistencyLevel currentCL) {
 
-        // JAVA-1005: EACH_QUORUM does not report a global number of alive replicas
-        // so even if we get 0 alive replicas, there might be
-        // a node up in some other datacenter
-        if (knownOk > this.minAliveReplica || currentCL == ConsistencyLevel.EACH_QUORUM)
-            return RetryDecision.retry(this.retryConsistencyLevel);
+    private RetryDecision chosenCL(int retryAttempt, ConsistencyLevel currentCL) {
+        if (retryAttempt <= 2) {
+            // Retry on the next host, on the assumption that the initial coordinator could be network-isolated.
+            return RetryDecision.tryNextHost(currentCL);
+        } else if (retryAttempt >= this.maxRetryAttempts) {
+            return RetryDecision.rethrow();
+        }
         
-        return RetryDecision.rethrow();
+        return RetryDecision.retry(this.retryConsistencyLevel);
     }
 
-    /**
-     * {@inheritDoc}
-     * <p/>
-     * This implementation triggers multiple retries. If less replica
-     * responded than required by the consistency level (but at least one
-     * replica did respond), the operation is retried at the specific
-     * consistency level. If enough replica responded but data was not
-     * retrieved, the operation is retried with the initial consistency
-     * level. Otherwise, an exception is thrown.
-     */
+
     @Override
     public RetryDecision onReadTimeout(Statement statement, ConsistencyLevel cl, int requiredResponses, int receivedResponses, boolean dataRetrieved, int nbRetry) {
+
         if (nbRetry >= this.maxRetryAttempts)
             return RetryDecision.rethrow();
 
@@ -92,47 +73,27 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
         if (cl.isSerial())
             return RetryDecision.rethrow();
 
-        if (receivedResponses < requiredResponses) {
-            // Tries with the CL that is expected to work
-            return chosenCL(receivedResponses, cl);
-        }
-
-        return !dataRetrieved ? RetryDecision.retry(cl) : RetryDecision.rethrow();
+        return chosenCL(nbRetry, cl);
     }
 
-    /**
-     * {@inheritDoc}
-     * <p/>
-     * This implementation triggers multiple retries. If {@code writeType ==
-     * WriteType.BATCH_LOG}, the write is retried with the initial
-     * consistency level. If {@code writeType == WriteType.UNLOGGED_BATCH}
-     * and at least one replica acknowledged, the write is retried with the
-     * chosen consistency level (with unlogged batch, a write timeout can
-     * <b>always</b> mean that part of the batch haven't been persisted at
-     * all, even if {@code receivedAcks > 0}). For write types ({@code WriteType.SIMPLE}
-     * we retry at the chosen CL. For {@code WriteType.BATCH}), we retry at the chosen CL.
-     * Otherwise, an exception is thrown.
-     */
+
     @Override
     public RetryDecision onWriteTimeout(Statement statement, ConsistencyLevel cl, WriteType writeType, 
                                         int requiredAcks, int receivedAcks, int nbRetry) {
-        //Shouldnt happen, but just to be sure
-        if (!statement.isIdempotent())
-            return RetryDecision.rethrow();
 
         if (nbRetry >= this.maxRetryAttempts)
             return RetryDecision.rethrow();
 
         switch (writeType) {
             case SIMPLE:
-                return chosenCL(receivedAcks, cl);
+                return chosenCL(nbRetry, cl);
             case BATCH:
                 // Since we provide atomicity there is no point in retrying
-                return chosenCL(receivedAcks, cl);
+                return chosenCL(nbRetry, cl);
             case UNLOGGED_BATCH:
                 // Since only part of the batch could have been persisted,
                 // retry with whatever consistency should allow to persist all
-                return chosenCL(receivedAcks, cl);
+                return chosenCL(nbRetry, cl);
             case BATCH_LOG:
                 return RetryDecision.retry(cl);
         }
@@ -140,18 +101,9 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
         return RetryDecision.rethrow();
     }
 
-    /**
-     * {@inheritDoc}
-     * <p/>
-     * This implementation triggers a maximum number of chosen retrues. If the minumum replica
-     * is know to be alive, the operation is retried at the chosen consistency
-     * level.
-     */
+
     @Override
     public RetryDecision onUnavailable(Statement statement, ConsistencyLevel cl, int requiredReplica, int aliveReplica, int nbRetry) {
-        //Shouldnt happen, but just to be sure
-        if (!statement.isIdempotent())
-            return RetryDecision.rethrow();
                  
         if (nbRetry >= this.maxRetryAttempts)
             return RetryDecision.rethrow();
@@ -162,19 +114,14 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
             return RetryDecision.tryNextHost(null);
 
         // Tries the biggest CL that is expected to work
-        return chosenCL(aliveReplica, cl);
+        return chosenCL(nbRetry, cl);
     }
 
-    /**
-     * {@inheritDoc}
-     * <p/>
-     * This implementation triggers a retry on the next host in the query plan
-     * with the same consistency level, if the the statement is idempotent.
-     */
+
     @Override
     public RetryDecision onRequestError(Statement statement, ConsistencyLevel cl, DriverException e, int nbRetry) {
-        //Shouldnt happen, but just to be sure
-        if (!statement.isIdempotent())
+
+        if (nbRetry >= this.maxRetryAttempts)
             return RetryDecision.rethrow();
 
         return RetryDecision.tryNextHost(cl);
