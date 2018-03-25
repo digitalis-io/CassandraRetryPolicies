@@ -44,12 +44,12 @@ public final class SpecificConsistencyRetryPolicy implements RetryPolicy {
         }
 
         this.retryConsistencyLevel = ConsistencyLevel.valueOf(retryCL);
-        this.maxRetryAttempts = (maxRetryAttempts + 2); //Account for network blip retry attempts
+        this.maxRetryAttempts = (maxRetryAttempts + 1); //Account for network blip retry attempts
     }
 
 
     private RetryDecision chosenCL(int retryAttempt, ConsistencyLevel currentCL) {
-        if (retryAttempt <= 2) {
+        if (retryAttempt <= 1) {
             // Retry on the next host, on the assumption that the initial coordinator could be network-isolated.
             return RetryDecision.tryNextHost(currentCL);
         } else if (retryAttempt >= this.maxRetryAttempts) {
